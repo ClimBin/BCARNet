@@ -25,7 +25,7 @@ Dataset/
 ## Results
 We also released the model prediction results both based on resnet50 and pvt-b2, please visit: [prediction results](https://drive.google.com/drive/folders/1LIpid9ZdUHhYkrSmttHIgGbpMMa-aJPN?usp=sharing)
 
-## Other
+## Others
 Because the manuscript is under review, the training code is not disclosed yet. And some codes are temporarily hidden in model.py, please understand.
 
 In addition, because some existing evaluation codes are usually implemented based on Matlab, the evaluation is relatively slow. We have announced the evaluation code for the Python language version, which involves multi-threaded running jobs and enables rapid evaluation. This contains two files: eval.py and metrics.py 
