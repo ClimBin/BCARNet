@@ -1,13 +1,11 @@
+
 import os
 import torch
 import torch.nn as nn
 
 import torch.nn.functional as F
-from backbone import pvt_v2_b2,resnet50
+from backbone import resnet50
 from timm.models.layers import to_2tuple
-
-from pdb import set_trace
-
 def _upsample_like(src,tar):
 
     src = F.upsample(src, size=tar.shape[2:], mode='bilinear', align_corners=True)
@@ -27,7 +25,6 @@ class DWConv_Mulit(nn.Module):
         x = self.dwconv(x)
         x = x.flatten(2).transpose(1, 2)
         return x
-
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -73,7 +70,7 @@ class Attention(nn.Module):
     def forward(self, x, g, H, W):
         B, N, C = x.shape
         q = self.q(g).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        print("attn-----q",q.shape)
+        # print("attn-----q",q.shape)
 
         if self.sr_ratio > 1:
             x_ = x.permute(0, 2, 1).reshape(B, C, H, W)
@@ -83,14 +80,14 @@ class Attention(nn.Module):
         else:
             kv = self.kv(x).reshape(B, -1, 2, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         k, v = kv[0], kv[1]
-        print("attn-----k,v",k.shape,v.shape)
+        # print("attn-----k,v",k.shape,v.shape)
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        print("attn---attn",attn.shape)
+        # print("attn---attn",attn.shape)
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        print("attn---x",x.shape)
+        # print("attn---x",x.shape)
         x = self.proj(x)
         x = self.proj_drop(x)
 
@@ -114,12 +111,12 @@ class Block(nn.Module):
 
     def forward(self, x, g, H, W):
         msa, q, k = self.attn(self.norm1(x),self.norm2(g), H, W)
-        print("block--msa,q,k",msa.shape,q.shape,k.shape)
+        # print("block--msa,q,k",msa.shape,q.shape,k.shape)
         
         x = x + g + msa
         
         x = x + self.mlp(self.norm2(x), H, W)
-        print("block",x.shape)
+        # print("block",x.shape)
 
         return x, q, k
     
@@ -150,49 +147,40 @@ class OverlapPatchEmbed(nn.Module):
         x = self.norm(x)
         return x, H, W
 
-
 class CrossAttentionModule(nn.Module):
-    def __init__(self, in_planes, out_planes, mode = "lh"):
+    def __init__(self, in_planes, out_planes, img_size, mode = "lh"):
         super(CrossAttentionModule, self).__init__()
 
-        self.patch_embed_norm = OverlapPatchEmbed(img_size=224 // 4, patch_size=3, stride=1, in_chans=in_planes,
+        self.patch_embed_norm = OverlapPatchEmbed(img_size=img_size, patch_size=3, stride=1, in_chans=in_planes,
                                              embed_dim=out_planes)
-        self.patch_embed_down = OverlapPatchEmbed(img_size=224 // 4, patch_size=3, stride=1, in_chans=out_planes,
+        self.patch_embed_down = OverlapPatchEmbed(img_size=img_size, patch_size=3, stride=1, in_chans=out_planes,
                                              embed_dim=out_planes)
         self.block = Block(dim=out_planes)
         self.norm = nn.LayerNorm(out_planes)
         self.upx2 = upx['x2']
         self.mode = mode
-        #Temporarily hidden as the manuscript is under review
 
     def forward(self, Fkv, Fq):  # l->h, Fq:down, Fkv,norm   h->l, Fq:norm, Fkv:down 
         B = Fkv.shape[0]
         if self.mode == 'lh':
-            #Temporarily hidden as the manuscript is under review
-            pass
+            Fkv = F.upsample(Fkv, size=Fq.shape[2:], mode='bilinear', align_corners=False)
+            # x_a=self.conv_xa(x)
+            x_t, H, W = self.patch_embed_norm(Fkv)    # kv
+            g_t,H,W= self.patch_embed_down(Fq)        # q
         else:
-            #Temporarily hidden as the manuscript is under review
-            pass
-        
+            Fq = F.upsample(Fq, size=Fkv.shape[2:], mode='bilinear', align_corners=False)
+            x_t, H, W = self.patch_embed_down(Fkv)
+            g_t, H, W = self.patch_embed_norm(Fq)
+        # print("cross---over,xt,gt,h,w",x_t.shape,g_t.shape,H,W)
 
-        #Temporarily hidden as the manuscript is under review
+        x_t, q, k = self.block(x_t,g_t, H, W)          # heat map
+        # print("cross---block out, x_t,q,k",x_t.shape,q.shape,k.shape)
+        x_t = self.norm(x_t)
+        x_t = x_t.reshape(B, H, W, -1).permute(0, 3, 1, 2).contiguous()  # heat map
+        # print("cross-xt",x_t.shape)
+        x_t = x_t + Fq
+        return x_t
     
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=3):
-        super(SpatialAttention, self).__init__()
-
-        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
-        padding = 3 if kernel_size == 7 else 1
-
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return x
-
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction=4):
         super(ChannelAttention, self).__init__()
@@ -227,42 +215,6 @@ class conv2d(nn.Module):
             x = self.relu(x)
         return x
 
-class CFM(nn.Module):  #cascaded fusion module
-    def __init__(self, ):
-        super().__init__()
-
-        self.upx2 = upx['x2']
-        self.upx4 = upx['x4']
-
-        self.conv1 = conv2d(32,32,1,0)
-        
-        self.conv2 = conv2d(64,32,1,0)
-
-        self.conv3_1 = conv2d(64,32,1,0)
-        self.conv3_2 = nn.Sequential(
-            conv2d(32,32,3,1),
-            nn.Dropout2d(0.1,False),
-            nn.Conv2d(32,1,3,1,1,bias=False)
-        )
-
-    def forward(self, xh, xm, xl):
-        xh = self.conv1(xh)
-        xh = self.upx2(xh)
-        xm_ = xm
-        xm  = torch.cat((xh,xm),1)
-        xm = self.conv2(xm)
-        xm = xm + xm_
-        xm = self.upx2(xm)
-        xl_ = xl
-        xl = torch.cat((xm,xl),1)
-        xl = self.conv3_1(xl)
-        xl = xl + xl_
-
-        out = self.conv3_2(xl)
-        out = self.upx4(out)
-
-        return out
-
 class BiAttention(nn.Module):
     def __init__(self, in_channel):
         super(BiAttention, self).__init__()
@@ -277,8 +229,64 @@ class BiAttention(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1))
 
     def forward(self, x):
-        #Temporarily hidden as the manuscript is under review
-        pass
+        N, C, H, W = x.size()
+        x_h = x.permute(0, 3, 1, 2).contiguous().view(N * W, -1, H)
+        x_w = x.permute(0, 2, 1, 3).contiguous().view(N * H, -1, W)
+        x_h_ = self.conv_h(F.avg_pool2d(x, [1, W]).view(N, -1, H).permute(0, 2, 1))
+        x_w_ = self.conv_w(F.avg_pool2d(x, [H, 1]).view(N, -1, W).permute(0, 2, 1))
+        weight_h = self.softmax(torch.matmul(x_h, x_h_.repeat(W, 1, 1)))
+        weight_w = self.softmax(torch.matmul(x_w, x_w_.repeat(H, 1, 1)))
+        out_h = torch.bmm(weight_h, x_h).view(N, W, -1, H).permute(0, 2, 3, 1)
+        out_w = torch.bmm(weight_w, x_w).view(N, H, -1, W).permute(0, 2, 1, 3)
+
+        out = self.gamma * (out_h + out_w) + x
+
+        return self.conv(out)
+
+def extract_local_features(x, kernel_size=3, stride=1, padding=1):
+    """
+    Extracts local neighborhoods around each pixel of the input feature map.
+    
+    Args:
+        x: Input tensor of shape (N, C, H, W)
+        kernel_size: Size of the local neighborhood (k x k)
+        stride: Stride of the neighborhoods extraction
+        padding: Padding applied to the input
+    
+    Returns:
+        Local features of shape (N, C, (k * k), H', W')
+    """
+    # Ensure the input x is a 4D tensor
+    N, C, H, W = x.shape
+    
+    x_padded = F.pad(x, (padding, padding, padding, padding), mode='constant', value=0)
+
+    # Use unfold to extract sliding local blocks
+    x_unfolded_h = x_padded.unfold(2, kernel_size, stride).unfold(3, kernel_size, stride)
+    
+    # x_unfolded_h shape: (N, C, H', W', k, k)
+    # Rearrange the output to get the desired shape (N, C, (k * k), H', W')
+    # x_unfolded_h = x_unfolded_h.contiguous().view(N, C, -1, x_unfolded_h.shape[2], x_unfolded_h.shape[3])
+    x_unfolded_h = x_unfolded_h.permute(0,1,4,5,2,3).contiguous().view(N,C,-1,H,W)
+    
+    return x_unfolded_h
+
+    
+class ImprovNonLocalModule(nn.Module):
+    def __init__(self, in_channel, mid_out_channel=1):
+        super(ImprovNonLocalModule, self).__init__()
+        self.in_channel = in_channel
+        self.conv_gobal = nn.Conv2d(in_channel, mid_out_channel, kernel_size=1)
+        self.conv_q = nn.Conv2d(in_channel, mid_out_channel, kernel_size=1)
+        self.conv_k = nn.Conv2d(in_channel, mid_out_channel, kernel_size=1)
+        self.conv_v = nn.Conv2d(in_channel, in_channel, kernel_size=1)
+        # self.conv_w = nn.Conv2d(in_channel, in_channel, kernel_size=1)
+        self.mid_c = mid_out_channel
+    
+    def forward(self, in_x):
+        #   this part is hidden temporarily
+        
+        return output
 
 
 class ICAN(nn.Module):
@@ -290,11 +298,11 @@ class ICAN(nn.Module):
 
         #backbone
         if args.backbone_name == 'resnet':
-            self.backbone = resnet101()
-            path = 'resnet50.pth'
+            self.backbone = resnet50()
+            path = 
         elif args.backbone_name == 'pvt':
             self.backbone = pvt_v2_b2()
-            path = 'pvt_v2_b2.pth'
+            path = 
 
         save_model = torch.load(path)
         model_dict = self.backbone.state_dict()
@@ -308,58 +316,84 @@ class ICAN(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(True)
         )
-        self.compr1_ca = ChannelAttention(32)
+        self.compr1_ca = BiAttention(32)
         self.compr2_conv = nn.Sequential(
             nn.Conv2d(self.channel_num[1], 32, 1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(True)
         )
-        self.compr2_ca = ChannelAttention(32)
+        self.compr2_ca = BiAttention(32)
         self.compr3_conv = nn.Sequential(
             nn.Conv2d(self.channel_num[2], 32, 1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(True)
         )
-        self.compr3_ca = ChannelAttention(32)
+        self.compr3_ca = BiAttention(32)
         self.compr4_conv = nn.Sequential(
             nn.Conv2d(self.channel_num[3], 32, 1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(True)
         )
-        self.compr4_ca = ChannelAttention(32)
+        self.compr4_ca = BiAttention(32)
 
         self.conv1 = nn.Sequential(
             nn.Conv2d(64,32,3,1,1,bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            BiAttention(32)
         )
+        # self.inlm1 = ImprovNonLocalModule(32)
         self.conv2 = nn.Sequential(
             nn.Conv2d(64,32,3,1,1,bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            BiAttention(32)
         )
+        # self.inlm2 = ImprovNonLocalModule(32)
         self.conv3 = nn.Sequential(
             nn.Conv2d(64,32,3,1,1,bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            BiAttention(32)
         )
-        
-        # self.cros_att1_1 = CrossAttentionModule(32,32)      
-        # self.cros_att2_1 = CrossAttentionModule(32,32) 
-        # self.cros_att3_1 = CrossAttentionModule(32,32)
+        self.inlm3 = ImprovNonLocalModule(32)
+    
+        self.cros_att1_2 = CrossAttentionModule(32,32,args.image_size//4, mode='hl')          
+        self.cros_att2_2 = CrossAttentionModule(32,32,args.image_size//8,mode='hl')
+        self.cros_att3_2 = CrossAttentionModule(32,32,args.image_size//16,mode='hl')
 
-        self.cros_att1_2 = CrossAttentionModule(32,32, mode='hl')          
-        self.cros_att2_2 = CrossAttentionModule(32,32, mode='hl')
-        self.cros_att3_2 = CrossAttentionModule(32,32, mode='hl')
+        self.cros_att1_1 = CrossAttentionModule(32,32,args.image_size//4, mode='lh')          
+        self.cros_att2_1 = CrossAttentionModule(32,32,args.image_size//8,mode='lh')
+        self.cros_att3_1 = CrossAttentionModule(32,32,args.image_size//16,mode='lh')
 
-        #Temporarily hidden as the manuscript is under review
+
+        self.att_conv1 = conv2d(64, 32, 1,0, act=True)
+        self.att_conv2 = conv2d(64, 32, 1,0, act=True)
+        self.att_conv3 = conv2d(64, 32, 1,0, act=True)
+
+        self.side3out = nn.Sequential(
+            nn.Conv2d(32,32,3,padding=1,bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32,1,1,padding=0,bias=False)
+        )
+        self.side2out = nn.Sequential(
+            nn.Conv2d(32,32,3,padding=1,bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32,1,1,padding=0,bias=False)
+        )
+        self.side1out = nn.Sequential(
+            nn.Conv2d(32,32,3,padding=1,bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32,1,1,padding=0,bias=False)
+        )
+
 
     def compress_channel(self, block_conv, block_ca, feature):
-        #Temporarily hidden as the manuscript is under review
-        pass
+        feature  = block_conv(feature)
+        # feature_ = feature
+        feature  = block_ca(feature)
+        # feature  = feature + feature_
+        return feature
         
     def forward(self, images):
         # backbone features
@@ -372,36 +406,42 @@ class ICAN(nn.Module):
         f4  = self.compress_channel(self.compr4_conv, self.compr4_ca, f4)
         
         # cros3_lh = self.cros_att3_1(f4,f3)  
-        set_trace()
-        cros3_hl = self.cros_att3_2(f3,f4)
-        cros3_hl = self.att_conv3(cros3_hl)
+        # set_trace()
+        cros3_hl_1 = self.cros_att3_2(f3,f4)
+        cros3_hl_2 = self.cros_att3_1(f4,f3)
+        cros3_hl = self.att_conv3(torch.cat((cros3_hl_1,cros3_hl_2),dim=1))
+        
         cat3 = torch.cat((cros3_hl,upx['x2'](f4)),dim=1)  # heat map
         cat3_out = self.conv3(cat3)   # heat map
-        side3 = self.side3out(cat3)
+        cat3_out = self.inlm3(cat3_out)
+        
+        side3 = self.side3out(cat3_out)
         side3 = upx['x16'](side3)
 
-        # cros2_lh = self.cros_att2_1(cros3_out,f2)
-        cros2_hl = self.cros_att2_2(f2,cat3_out)
-        cros2_hl = self.att_conv2(cros2_hl)
+        cros2_hl_1 = self.cros_att2_2(f2,cat3_out)
+        cros2_hl_2 = self.cros_att2_1(cat3_out,f2)
+        cros2_hl = self.att_conv2(torch.cat((cros2_hl_1,cros2_hl_2),dim=1))
         cat2 = torch.cat((cros2_hl,upx['x2'](cat3_out)),dim=1)
         cat2_out = self.conv2(cat2)
-        side2 = self.side2out(cat2)
+
+        
+        # cat2_out = upx['x2'](self.inlm2(F.avg_pool2d(cat2_out,kernel_size=2,stride=2)))
+
+        side2 = self.side2out(cat2_out)
         side2 = upx['x8'](side2)
 
-        # cros1_lh = self.cros_att1_1(cros2_out,f1)
-        cros1_hl = self.cros_att1_2(f1,cat2_out)
-        cros1_hl = self.att_conv1(cros1_hl)
+        cros1_hl_1 = self.cros_att1_2(f1,cat2_out)
+        cros1_hl_2 = self.cros_att1_1(cat2_out,f1)
+        cros1_hl = self.att_conv1(torch.cat((cros1_hl_1,cros1_hl_2),dim=1))
         cat1 = torch.cat((cros1_hl, upx['x2'](cat2_out)),dim=1)
         cat1_out = self.conv1(cat1)
+        # cat1_out = upx['x4'](self.inlm1(F.avg_pool2d(cat1_out,kernel_size=4,stride=4)))
 
-        side1 = self.side1out(cat1)
+        side1 = self.side1out(cat1_out)
         side1 = upx['x4'](side1)
 
-        res = self.final_out(cat1_out)
-        res = upx['x4'](res)
 
 
-        return res, side1, side2, side3
-
+        return side1, side2, side3
 
 
