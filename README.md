@@ -2,7 +2,7 @@
 This is the official code implementation of the paper "ORSI Salient Object Detection via Bidirectional Cross-Attention and Attention Restoration"
 
 ## Test
-If you want to test our model, you can place the data set and pre-trained parameters into the specified folder, and then run test.py. Please visit the following link to obtain the pre-trained model: [pre-trained model(ckpt)](https://drive.google.com/drive/folders/1LIpid9ZdUHhYkrSmttHIgGbpMMa-aJPN?usp=sharing)
+If you want to test our model, you can place the data set and pre-trained parameters into the specified folder, and then run test.py. Please visit the following link to obtain the pre-trained model: [pre-trained model(ckpt)](https://drive.google.com/drive/folders/1CyuFBo8e0jixgskjqNvyJrptD2hDsj4v?usp=sharing)
 ```
 Dataset/
 │
